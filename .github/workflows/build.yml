@@ -1,0 +1,192 @@
+name: EIP build & test
+
+# Repo layout this workflow assumes:
+#    .github/workflows/build.yml    (this file)
+#    EIP/Code/                      (the EIP project: core/, python/, cli/,
+#                                    examples/, tests/, build/, README.md)
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: EIP/Code
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Linux: builds eip_core.dll (cross-compiled) + libeip_core.so (portable
+  # subset) + Demo.exe, then runs every native C++ test that doesn't need
+  # a live Windows process (PE parsing, persistent patch, error codes,
+  # platform fallback, x86-64 instruction-length decoder).
+  # ---------------------------------------------------------------------
+  native-build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mingw-w64 (x86_64 + i686 cross compilers)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++-mingw-w64-x86-64 g++-mingw-w64-i686
+
+      - name: Build native core (eip_core.dll + libeip_core.so) and Demo.exe
+        run: bash build/build.sh
+
+      - name: Run native test suite
+        run: bash build/run_native_tests.sh
+
+      - name: Upload native build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: eip-native-core
+          path: |
+            EIP/Code/build/eip_core.dll
+            EIP/Code/build/libeip_core.a
+            EIP/Code/build/libeip_core.so
+            EIP/Code/examples/demo_program/Demo.exe
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
+  # Linux: the Python API test suite, run against libeip_core.so (the
+  # portable PE/persistent-patch subset - every call that needs a live
+  # Windows process correctly raises NotImplementedOnPlatform here, which
+  # is itself asserted by tests/python/test_errors.py).
+  # ---------------------------------------------------------------------
+  python-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install mingw-w64 (needed to build Demo.exe as a PE fixture)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++-mingw-w64-x86-64
+
+      - name: Build native core + Demo.exe
+        run: bash build/build.sh
+
+      - name: Run Python test suite
+        run: bash build/run_python_tests.sh
+
+  # ---------------------------------------------------------------------
+  # Windows: the real deal. Builds eip_core.dll and Demo.exe with MSVC,
+  # starts Demo.exe as an actual running process, attaches to it for real,
+  # and runs the full live test (value read/set, function discovery,
+  # transaction commit + rollback-on-failure, hook install/remove with
+  # byte-level verification, feature install/uninstall, runtime change
+  # tracking) plus the Python examples against the same live process.
+  # ---------------------------------------------------------------------
+  windows-live-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build eip_core.dll (MSVC)
+        shell: cmd
+        run: |
+          cl /std:c++17 /EHsc /LD /O2 /Icore\include core\src\*.cpp /Fe:build\eip_core.dll
+          if errorlevel 1 exit /b 1
+
+      - name: Build Demo.exe (MSVC)
+        shell: cmd
+        run: |
+          cl /std:c++17 /EHsc /O2 examples\demo_program\Demo.c /Fe:examples\demo_program\Demo.exe
+          if errorlevel 1 exit /b 1
+
+      - name: Build test_windows_live.exe (MSVC)
+        shell: cmd
+        run: |
+          cl /std:c++17 /EHsc /O2 /Icore\include core\src\common.cpp core\src\pe.cpp core\src\memory.cpp core\src\process.cpp core\src\x86len.cpp core\src\target.cpp core\src\value.cpp core\src\function.cpp core\src\hook.cpp core\src\event.cpp core\src\transaction.cpp core\src\feature.cpp core\src\runtime.cpp core\src\patch.cpp tests\native\test_windows_live.cpp /Fe:test_windows_live.exe
+          if errorlevel 1 exit /b 1
+
+      - name: Start Demo.exe in the background
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath "examples\demo_program\Demo.exe" -PassThru -RedirectStandardOutput "demo_stdout.log"
+          Start-Sleep -Seconds 2
+          if ($proc.HasExited) {
+            Write-Error "Demo.exe exited immediately; see demo_stdout.log"
+            Get-Content demo_stdout.log
+            exit 1
+          }
+          Write-Host "Demo.exe running as pid $($proc.Id)"
+
+      - name: Run native live test (attach, value, function, transaction, hook, feature, runtime)
+        shell: cmd
+        run: |
+          test_windows_live.exe
+          if errorlevel 1 exit /b 1
+
+      - name: Run Python examples against the live process
+        shell: pwsh
+        env:
+          EIP_CORE_PATH: build\eip_core.dll
+        run: |
+          python examples\change_value.py
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          python examples\add_export_feature.py
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          python examples\hook_function.py
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Stop Demo.exe
+        if: always()
+        shell: pwsh
+        run: |
+          Get-Process Demo -ErrorAction SilentlyContinue | Stop-Process -Force
+          if (Test-Path demo_stdout.log) { Get-Content demo_stdout.log }
+
+      - name: Upload Windows build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eip-windows-msvc
+          path: |
+            EIP/Code/build/eip_core.dll
+            EIP/Code/examples/demo_program/Demo.exe
+            EIP/Code/test_windows_live.exe
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
+  # Fully portable: patch a copy of Demo.exe on disk with no process and
+  # no attach at all, runnable on any OS - a quick smoke test that doubles
+  # as a usage example in CI logs.
+  # ---------------------------------------------------------------------
+  persistent-patch-example:
+    runs-on: ubuntu-latest
+    needs: native-build-and-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install mingw-w64
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++-mingw-w64-x86-64
+
+      - name: Build native core + Demo.exe
+        run: bash build/build.sh
+
+      - name: Run the persistent-patch example end to end
+        env:
+          EIP_CORE_PATH: build/libeip_core.so
+        run: python3 examples/persistent_patch.py
