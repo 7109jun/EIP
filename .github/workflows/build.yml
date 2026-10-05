@@ -176,12 +176,20 @@ jobs:
             exit 1
           }
 
-          python examples\change_value.py
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          python examples\add_export_feature.py
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          python examples\hook_function.py
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+          function Run-Example($script) {
+            $out = & python $script 2>&1 | Tee-Object -FilePath "$($script -replace '[\\/]','_').log"
+            $code = $LASTEXITCODE
+            Write-Host ($out -join "`n")
+            if ($code -ne 0) {
+              $tail = ($out | Select-Object -Last 60) -join "`n"
+              $encoded = $tail -replace '%','%25' -replace "`r",'' -replace "`n",'%0A'
+              Write-Host "::error::$script exited with code $code. Output:%0A$encoded"
+              exit 1
+            }
+          }
+          Run-Example "examples\change_value.py"
+          Run-Example "examples\add_export_feature.py"
+          Run-Example "examples\hook_function.py"
 
       - name: Stop Demo.exe
         if: always()
