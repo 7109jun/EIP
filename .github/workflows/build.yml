@@ -128,10 +128,24 @@ jobs:
           Write-Host "Demo.exe running as pid $($proc.Id)"
 
       - name: Run native live test (attach, value, function, transaction, hook, feature, runtime)
-        shell: cmd
+        shell: pwsh
         run: |
-          test_windows_live.exe
-          if errorlevel 1 exit /b 1
+          & .\test_windows_live.exe *>&1 | Tee-Object -FilePath live_test_output.txt
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            $tail = (Get-Content live_test_output.txt -Tail 80 -ErrorAction SilentlyContinue) -join "`n"
+            $encoded = $tail -replace '%','%25' -replace "`r",'' -replace "`n",'%0A'
+            Write-Host "::error::test_windows_live.exe exited with code $code (0x$('{0:X8}' -f $code)). Tail of output:%0A$encoded"
+            exit 1
+          }
+
+      - name: Upload live test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eip-windows-live-test-log
+          path: Code/live_test_output.txt
+          if-no-files-found: ignore
 
       - name: Run Python examples against the live process
         shell: pwsh

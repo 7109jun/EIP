@@ -33,6 +33,14 @@
 using namespace eip;
 
 int main() {
+    // Unbuffered so that if a test step ever crashes the process (a real
+    // bug under test, e.g. a bad hand-assembled stub corrupting memory),
+    // everything printed up to that point is still flushed to the log
+    // instead of being lost in stdio's default full-buffering when stdout
+    // is redirected to a file/pipe (as CI does).
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
+
     std::printf("[1] attach to Demo.exe\n");
     ProcessHandle ph = ProcessHandle::attach_name("Demo.exe");
     CHECK(ph.attached(), "attached to Demo.exe");
