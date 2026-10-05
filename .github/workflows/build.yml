@@ -2,7 +2,7 @@ name: EIP build & test
 
 # Repo layout this workflow assumes:
 #    .github/workflows/build.yml    (this file)
-#    EIP/Code/                      (the EIP project: core/, python/, cli/,
+#    Code/                      (the EIP project: core/, python/, cli/,
 #                                    examples/, tests/, build/, README.md)
 
 on:
@@ -13,7 +13,7 @@ on:
 
 defaults:
   run:
-    working-directory: EIP/Code
+    working-directory: Code
 
 jobs:
   # ---------------------------------------------------------------------
@@ -43,10 +43,10 @@ jobs:
         with:
           name: eip-native-core
           path: |
-            EIP/Code/build/eip_core.dll
-            EIP/Code/build/libeip_core.a
-            EIP/Code/build/libeip_core.so
-            EIP/Code/examples/demo_program/Demo.exe
+            Code/build/eip_core.dll
+            Code/build/libeip_core.a
+            Code/build/libeip_core.so
+            Code/examples/demo_program/Demo.exe
           if-no-files-found: error
 
   # ---------------------------------------------------------------------
@@ -158,9 +158,9 @@ jobs:
         with:
           name: eip-windows-msvc
           path: |
-            EIP/Code/build/eip_core.dll
-            EIP/Code/examples/demo_program/Demo.exe
-            EIP/Code/test_windows_live.exe
+            Code/build/eip_core.dll
+            Code/examples/demo_program/Demo.exe
+            Code/test_windows_live.exe
           if-no-files-found: error
 
   # ---------------------------------------------------------------------
