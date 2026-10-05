@@ -1,0 +1,17 @@
+# build outputs (rebuilt by build/build.sh / CI)
+build/*.dll
+build/*.so
+build/*.a
+build/*.lib
+build/*.exp
+examples/demo_program/*.exe
+examples/demo_program/*.obj
+*.o
+*.obj
+*.exe
+*.patched*.exe
+*.modified*.exe
+
+__pycache__/
+*.pyc
+.pytest_cache/
