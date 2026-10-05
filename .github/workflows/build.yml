@@ -115,7 +115,18 @@ jobs:
           cl /std:c++17 /EHsc /O2 /Icore\include core\src\common.cpp core\src\pe.cpp core\src\memory.cpp core\src\process.cpp core\src\x86len.cpp core\src\target.cpp core\src\value.cpp core\src\function.cpp core\src\hook.cpp core\src\event.cpp core\src\transaction.cpp core\src\feature.cpp core\src\runtime.cpp core\src\patch.cpp tests\native\test_windows_live.cpp /Fe:test_windows_live.exe
           if errorlevel 1 exit /b 1
 
-      - name: Start Demo.exe in the background
+      # Demo.exe is started AND attached to in this same step (rather than a
+      # separate "start" step before it) because GitHub's Windows runners
+      # put each step's processes in their own Job Object with
+      # kill-on-job-close semantics: a process started with Start-Process in
+      # one step is still alive when that step's 2-second sanity check
+      # passes, but gets torn down the instant the step itself completes -
+      # so a *later* step attaching by name finds no process at all. This
+      # was diagnosed from this workflow's own trace output (EIP_TRACE in
+      # process.cpp): process::list() enumerated every other process
+      # correctly, just never Demo.exe, in a run where the prior "start"
+      # step had already reported it running successfully.
+      - name: Run native live test (attach, value, function, transaction, hook, feature, runtime)
         shell: pwsh
         run: |
           $proc = Start-Process -FilePath "examples\demo_program\Demo.exe" -PassThru -RedirectStandardOutput "demo_stdout.log"
@@ -127,11 +138,14 @@ jobs:
           }
           Write-Host "Demo.exe running as pid $($proc.Id)"
 
-      - name: Run native live test (attach, value, function, transaction, hook, feature, runtime)
-        shell: pwsh
-        run: |
           & .\test_windows_live.exe *>&1 | Tee-Object -FilePath live_test_output.txt
           $code = $LASTEXITCODE
+
+          if (Test-Path demo_stdout.log) {
+            Write-Host "--- Demo.exe stdout ---"
+            Get-Content demo_stdout.log
+          }
+
           if ($code -ne 0) {
             $tail = (Get-Content live_test_output.txt -Tail 80 -ErrorAction SilentlyContinue) -join "`n"
             $encoded = $tail -replace '%','%25' -replace "`r",'' -replace "`n",'%0A'
@@ -147,11 +161,21 @@ jobs:
           path: Code/live_test_output.txt
           if-no-files-found: ignore
 
+      # Demo.exe was already torn down with the previous step's Job Object,
+      # so it's restarted here too for the same reason explained above.
       - name: Run Python examples against the live process
         shell: pwsh
         env:
           EIP_CORE_PATH: build\eip_core.dll
         run: |
+          $proc = Start-Process -FilePath "examples\demo_program\Demo.exe" -PassThru -RedirectStandardOutput "demo_stdout2.log"
+          Start-Sleep -Seconds 2
+          if ($proc.HasExited) {
+            Write-Error "Demo.exe exited immediately; see demo_stdout2.log"
+            Get-Content demo_stdout2.log
+            exit 1
+          }
+
           python examples\change_value.py
           if ($LASTEXITCODE -ne 0) { exit 1 }
           python examples\add_export_feature.py

@@ -86,10 +86,26 @@ std::vector<ProcessSummary> list() {
             s.pid = pe.th32ProcessID;
             s.name = pe.szExeFile;
             s.path = pe.szExeFile; // full path resolved lazily via module() for the attached case
+            // Temporary: log any process name that might plausibly be our
+            // target, to see what attach_name's "no match" is actually
+            // seeing it as (wrong name? already exited and replaced by
+            // something else? not visible at all?).
+            std::string lname = s.name;
+            std::transform(lname.begin(), lname.end(), lname.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+            if (lname.find("demo") != std::string::npos) {
+                EIP_TRACE(("list(): candidate process pid=" + std::to_string(s.pid) + " name='" + s.name + "'").c_str());
+            }
             out.push_back(std::move(s));
             iter++;
         } while (Process32Next(snap.h, &pe));
         EIP_TRACE(("list(): loop finished, iterations=" + std::to_string(iter)).c_str());
+        bool any_demo = false;
+        for (auto& s2 : out) {
+            std::string ln = s2.name;
+            std::transform(ln.begin(), ln.end(), ln.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+            if (ln.find("demo") != std::string::npos) any_demo = true;
+        }
+        if (!any_demo) EIP_TRACE("list(): no process name containing 'demo' was seen in this snapshot");
     } else {
         EIP_TRACE("list(): Process32First returned false");
     }
