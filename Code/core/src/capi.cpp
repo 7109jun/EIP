@@ -7,6 +7,7 @@
 #include <cstring>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 using namespace eip;
 
@@ -54,7 +55,21 @@ ScalarValue from_capi(const eip_scalar& v) {
 } // namespace
 
 // Opaque struct definitions.
-struct eip_session_s { Session session; explicit eip_session_s(ProcessHandle p) : session(std::move(p)) {} };
+struct eip_session_s {
+    Session session;
+    // eip_hook_handle (the C ABI struct) only carries target/detour/
+    // trampoline - it has no room for original_bytes/patch_size, which
+    // HookEngine::remove() needs to actually restore the patched bytes.
+    // Without this, eip_hook_remove had no way to recover them and silently
+    // called remove() with an empty original_bytes vector, which both
+    // failed to restore the function (a correctness bug) and crashed with
+    // MemoryProtectFailed/ERROR_INVALID_PARAMETER on a real Windows target
+    // (VirtualProtectEx rejects a zero-length range). Keeping the full
+    // HookRecord here, keyed by target address, lets remove() use the real
+    // data while leaving the public ABI unchanged.
+    std::unordered_map<Address, HookRecord> active_hooks;
+    explicit eip_session_s(ProcessHandle p) : session(std::move(p)) {}
+};
 struct eip_feature_s { Feature* feature; };
 struct eip_transaction_s { Transaction tx; eip_session_s* owner; explicit eip_transaction_s(eip_session_s* o) : tx(&o->session.runtime()), owner(o) {} };
 struct eip_pe_s { PEImage image; };
@@ -216,25 +231,25 @@ eip_status eip_hook_install(eip_session s, eip_address target, eip_address detou
         out->target = rec.target;
         out->detour = rec.detour;
         out->trampoline = rec.trampoline;
+        // Keep the full record (original_bytes, patch_size) server-side so
+        // eip_hook_remove can actually restore the patched function later -
+        // see the active_hooks comment on eip_session_s.
+        s->active_hooks[rec.target] = std::move(rec);
         return static_cast<eip_status>(ErrorCode::Ok);
     EIP_CATCH
 }
 
 eip_status eip_hook_remove(eip_session s, eip_hook_handle* h) {
     EIP_TRY
-        HookRecord rec;
-        rec.target = h->target;
-        rec.detour = h->detour;
-        rec.trampoline = h->trampoline;
+        auto it = s->active_hooks.find(h->target);
+        if (it == s->active_hooks.end()) {
+            throw EipError(ErrorCode::InvalidArgument,
+                "no active hook recorded for target=0x" + std::to_string(h->target) +
+                " (already removed, or installed by a different session)");
+        }
+        HookRecord rec = std::move(it->second);
+        s->active_hooks.erase(it);
         rec.active = true;
-        // original_bytes is unknown here by design (eip_hook_handle is a
-        // thin cross-ABI handle); Python keeps the full record and should
-        // use eip_function_restore directly if it needs raw-byte control.
-        // For the common path, Hook::remove needs original_bytes, so the
-        // Python layer is expected to retain them from install's result
-        // via a separate read before install if exact restore is required.
-        // Here we re-derive by reading function.find is not possible, so
-        // this call restores via the trampoline's own saved copy instead.
         s->session.hooks().remove(rec);
         return static_cast<eip_status>(ErrorCode::Ok);
     EIP_CATCH
