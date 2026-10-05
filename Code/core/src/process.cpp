@@ -37,6 +37,15 @@ PEImage ProcessHandle::read_module_pe(const ModuleInfo&) const {
 #include <psapi.h>
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
+
+// Temporary diagnostic tracing: this session's sandbox has no Windows
+// kernel, so attach-path code here was cross-compiled but never actually
+// executed before a real Windows CI runner hit a crash (exit code
+// 0xC0000409) somewhere in or around ProcessHandle::attach_name(). These
+// traces pin down exactly which Win32 call it happens in; remove once the
+// root cause is fixed and confirmed green on a real run.
+#define EIP_TRACE(msg) do { std::fprintf(stderr, "[eip-trace] %s\n", msg); std::fflush(stderr); } while (0)
 
 namespace eip {
 
@@ -58,22 +67,33 @@ struct SnapshotGuard {
 namespace process {
 
 std::vector<ProcessSummary> list() {
+    EIP_TRACE("list(): enter");
     std::vector<ProcessSummary> out;
+    EIP_TRACE("list(): calling CreateToolhelp32Snapshot");
     SnapshotGuard snap(TH32CS_SNAPPROCESS);
+    EIP_TRACE("list(): CreateToolhelp32Snapshot returned");
     if (!snap.valid()) {
         throw EipError(ErrorCode::InternalError, "CreateToolhelp32Snapshot failed gle=" + std::to_string(GetLastError()));
     }
     PROCESSENTRY32 pe{};
     pe.dwSize = sizeof(pe);
+    EIP_TRACE("list(): calling Process32First");
     if (Process32First(snap.h, &pe)) {
+        EIP_TRACE("list(): Process32First returned true, entering loop");
+        int iter = 0;
         do {
             ProcessSummary s;
             s.pid = pe.th32ProcessID;
             s.name = pe.szExeFile;
             s.path = pe.szExeFile; // full path resolved lazily via module() for the attached case
             out.push_back(std::move(s));
+            iter++;
         } while (Process32Next(snap.h, &pe));
+        EIP_TRACE(("list(): loop finished, iterations=" + std::to_string(iter)).c_str());
+    } else {
+        EIP_TRACE("list(): Process32First returned false");
     }
+    EIP_TRACE("list(): returning");
     return out;
 }
 
@@ -113,21 +133,30 @@ ProcessHandle& ProcessHandle::operator=(ProcessHandle&& other) noexcept {
 
 namespace {
 Arch detect_arch(HANDLE process) {
+    EIP_TRACE("detect_arch: enter");
     BOOL isWow64 = FALSE;
     SYSTEM_INFO sysInfo{};
+    EIP_TRACE("detect_arch: calling GetNativeSystemInfo");
     GetNativeSystemInfo(&sysInfo);
+    EIP_TRACE("detect_arch: GetNativeSystemInfo returned");
     bool hostIs64 = (sysInfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64);
-    if (!hostIs64) return Arch::X86;
-    if (IsWow64Process(process, &isWow64) && isWow64) return Arch::X86;
+    if (!hostIs64) { EIP_TRACE("detect_arch: host not amd64, returning X86"); return Arch::X86; }
+    EIP_TRACE("detect_arch: calling IsWow64Process");
+    BOOL ok = IsWow64Process(process, &isWow64);
+    EIP_TRACE("detect_arch: IsWow64Process returned");
+    if (ok && isWow64) return Arch::X86;
     return Arch::X64;
 }
 } // namespace
 
 ProcessHandle ProcessHandle::attach_pid(u32 pid) {
+    EIP_TRACE(("attach_pid: enter pid=" + std::to_string(pid)).c_str());
+    EIP_TRACE("attach_pid: calling OpenProcess");
     HANDLE h = OpenProcess(
         PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_VM_WRITE |
         PROCESS_VM_OPERATION | PROCESS_CREATE_THREAD | PROCESS_SUSPEND_RESUME | SYNCHRONIZE,
         FALSE, pid);
+    EIP_TRACE("attach_pid: OpenProcess returned");
     if (!h) {
         DWORD gle = GetLastError();
         ErrorCode code = (gle == ERROR_ACCESS_DENIED) ? ErrorCode::ProcessAccessDenied : ErrorCode::ProcessNotFound;
@@ -136,16 +165,22 @@ ProcessHandle ProcessHandle::attach_pid(u32 pid) {
     ProcessHandle ph;
     ph.handle_ = h;
     ph.pid_ = pid;
+    EIP_TRACE("attach_pid: calling detect_arch");
     ph.arch_ = detect_arch(h);
+    EIP_TRACE("attach_pid: detect_arch returned, constructing Memory");
     ph.memory_ = Memory(h);
+    EIP_TRACE("attach_pid: returning ProcessHandle");
     return ph;
 }
 
 ProcessHandle ProcessHandle::attach_name(const std::string& exe_name) {
+    EIP_TRACE(("attach_name: enter name='" + exe_name + "'").c_str());
     auto matches = process::find(exe_name);
+    EIP_TRACE(("attach_name: process::find returned, matches=" + std::to_string(matches.size())).c_str());
     if (matches.empty()) {
         throw EipError(ErrorCode::ProcessNotFound, "name='" + exe_name + "'");
     }
+    EIP_TRACE(("attach_name: calling attach_pid for pid=" + std::to_string(matches.front().pid)).c_str());
     return attach_pid(matches.front().pid);
 }
 
